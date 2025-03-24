@@ -299,10 +299,13 @@ load_results() {
   DISPLAY_TEXTS=()
   MESSAGE_IDS=()
   
-  while IFS="|" read -r id text; do
-    MESSAGE_IDS+=("$id")
-    DISPLAY_TEXTS+=("$text")
-  done < "$RESULTS_FILE"
+  # Check if results file exists before trying to read it
+  if [ -f "$RESULTS_FILE" ]; then
+    while IFS="|" read -r id text; do
+      MESSAGE_IDS+=("$id")
+      DISPLAY_TEXTS+=("$text")
+    done < "$RESULTS_FILE"
+  fi
   
   TOTAL_RESULTS=${#MESSAGE_IDS[@]}
 }
@@ -423,7 +426,10 @@ handle_loading_input() {
         ;;
     q)  # Quit
         touch "$CANCEL_FILE"
-        return 1
+        clear
+        echo "Search cancelled."
+        rm -rf "$TEMP_DIR"
+        exit 0
         ;;
   esac
   return 0
@@ -432,7 +438,7 @@ handle_loading_input() {
 # Monitor for keypresses and updates during loading
 while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
   # Always load the latest results before checking for input
-  if [ -f "$TEMP_DIR/update_display" ]; then
+  if [ -f "$TEMP_DIR/update_display" ] && [ -f "$RESULTS_FILE" ]; then
     rm -f "$TEMP_DIR/update_display"
     load_results
     full_redraw=true
@@ -444,11 +450,15 @@ while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
     # Handle Enter key specifically (which might be empty or a newline)
     if [ -z "$key" ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
       # Reload results before handling input to ensure we have the latest data
-      load_results
+      if [ -f "$RESULTS_FILE" ]; then
+        load_results
+      fi
       handle_loading_input "$key" || break
     elif [ -n "$key" ]; then
       # Reload results before handling input to ensure we have the latest data
-      load_results
+      if [ -f "$RESULTS_FILE" ]; then
+        load_results
+      fi
       handle_loading_input "$key" || break
     fi
   fi
@@ -470,13 +480,7 @@ if [ -f "$TEMP_DIR/status" ]; then
   fi
 fi
 
-# If loading was cancelled, exit
-if [ -f "$CANCEL_FILE" ]; then
-  rm -rf "$TEMP_DIR"
-  clear
-  echo "Search cancelled."
-  exit 0
-fi
+# If loading was cancelled, we've already exited in the handle_loading_input function
 
 # Final redraw after all results are loaded
 full_redraw=true
