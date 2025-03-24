@@ -229,7 +229,6 @@ process_result() {
   # in SC2001.
   # shellcheck disable=SC2001
   CLEAN_ID=$(echo "$msg_id" | sed 's/^id://')
-  MESSAGE_IDS+=("$CLEAN_ID")
   
   # Get formatted display text for this message
   FORMATTED_TEXT=$(notmuch show --format=text --entire-thread=false "id:$CLEAN_ID" | grep -m 1 "Subject:" | sed 's/Subject: //')
@@ -370,9 +369,9 @@ handle_loading_input() {
         CURRENT_POS=$((TOTAL_RESULTS - 1))
         # Check if we need to redraw the whole page
         if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
-          full_redraw=true
+            full_redraw=true
         else
-          full_redraw=false
+            full_redraw=false
         fi
         draw_results
         ;;
@@ -402,6 +401,9 @@ handle_loading_input() {
             echo "Selected position: $CURRENT_POS"
             echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
             echo "Message ID: $MESSAGE_ID"
+            echo "Total results: $TOTAL_RESULTS"
+            echo "Current position: $CURRENT_POS"
+            echo "All message IDs: ${MESSAGE_IDS[*]}"
           } > ~/.nms_debug.log
           
           clear
