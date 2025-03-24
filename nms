@@ -173,13 +173,15 @@ main_loop() {
           # Get the message ID from our stored array
           MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
           
-          # Debug info - save to a file for inspection
-          {
-            echo "Selected position: $CURRENT_POS"
-            echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
-            echo "Message ID: $MESSAGE_ID"
-            echo "Key code detected: $key (decimal: $(printf '%d' "'$key"))"
-          } > ~/.nms_debug.log
+          # Debug info - save to a file for inspection only when NMS_DEBUG=1
+          if [ "${NMS_DEBUG:-0}" = "1" ]; then
+            {
+              echo "Selected position: $CURRENT_POS"
+              echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
+              echo "Message ID: $MESSAGE_ID"
+              echo "Key code detected: $key (decimal: $(printf '%d' "'$key"))"
+            } > ~/.nms_debug.log
+          fi
           
           clear
           tput sgr0
@@ -358,8 +360,10 @@ sleep 0.1
 # Function to handle user input during loading
 handle_loading_input() {
   local key="$1"
-  # Log the key code for debugging
-  printf "Key pressed: '%s' (decimal: %d)\n" "$key" "$(printf '%d' "'$key" 2>/dev/null || echo "N/A")" >> ~/.nms_key_debug.log
+  # Log the key code for debugging only when NMS_DEBUG=1
+  if [ "${NMS_DEBUG:-0}" = "1" ]; then
+    printf "Key pressed: '%s' (decimal: %d)\n" "$key" "$(printf '%d' "'$key" 2>/dev/null || echo "N/A")" >> ~/.nms_key_debug.log
+  fi
   case "$key" in
     j)  # Move down
         if [ $CURRENT_POS -lt $((TOTAL_RESULTS - 1)) ]; then
@@ -419,16 +423,18 @@ handle_loading_input() {
           # Get the message ID from our stored array
           MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
           
-          # Debug info - save to a file for inspection
-          {
-            echo "Selected position: $CURRENT_POS"
-            echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
-            echo "Message ID: $MESSAGE_ID"
-            echo "Total results: $TOTAL_RESULTS"
-            echo "Current position: $CURRENT_POS"
-            echo "All message IDs: ${MESSAGE_IDS[*]}"
-            echo "Key code detected: $key (decimal: $(printf '%d' "'$key" 2>/dev/null || echo "N/A"))"
-          } > ~/.nms_debug.log
+          # Debug info - save to a file for inspection only when NMS_DEBUG=1
+          if [ "${NMS_DEBUG:-0}" = "1" ]; then
+            {
+              echo "Selected position: $CURRENT_POS"
+              echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
+              echo "Message ID: $MESSAGE_ID"
+              echo "Total results: $TOTAL_RESULTS"
+              echo "Current position: $CURRENT_POS"
+              echo "All message IDs: ${MESSAGE_IDS[*]}"
+              echo "Key code detected: $key (decimal: $(printf '%d' "'$key" 2>/dev/null || echo "N/A"))"
+            } > ~/.nms_debug.log
+          fi
           
           clear
           tput sgr0
