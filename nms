@@ -183,7 +183,7 @@ main_loop() {
           clear
           tput sgr0
           # Use the proper format for Evolution - quote the message ID to handle special characters
-          evolution "mid:$MESSAGE_ID" &
+          evolution "mid:\"$MESSAGE_ID\"" &
           sleep 1
           full_redraw=true
           draw_results
@@ -397,7 +397,7 @@ handle_loading_input() {
           clear
           tput sgr0
           # Use the proper format for Evolution - quote the message ID to handle special characters
-          evolution "mid:$MESSAGE_ID" &
+          evolution "mid:\"$MESSAGE_ID\"" &
           sleep 1
           full_redraw=true
           draw_results
