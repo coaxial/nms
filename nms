@@ -182,8 +182,8 @@ main_loop() {
           
           clear
           tput sgr0
-          # Use the proper format for Evolution
-          evolution "mid:$MESSAGE_ID" &
+          # Use the proper format for Evolution - quote the message ID to handle special characters
+          evolution "mid:\"$MESSAGE_ID\"" &
           sleep 1
           full_redraw=true
           draw_results
@@ -228,7 +228,7 @@ process_result() {
   # This is too complex a regex, it cannot be replaced with the syntax suggested
   # in SC2001.
   # shellcheck disable=SC2001
-  CLEAN_ID=$(echo "$msg_id" | sed 's/^id://')
+  CLEAN_ID=$(echo "$msg_id" | sed 's/^.*id://')
   MESSAGE_IDS+=("$CLEAN_ID")
   
   # Get formatted display text for this message
@@ -396,8 +396,8 @@ handle_loading_input() {
           
           clear
           tput sgr0
-          # Use the proper format for Evolution
-          evolution "mid:$MESSAGE_ID" &
+          # Use the proper format for Evolution - quote the message ID to handle special characters
+          evolution "mid:\"$MESSAGE_ID\"" &
           sleep 1
           full_redraw=true
           draw_results
