@@ -1,0 +1,259 @@
+#!/bin/bash
+# Interactive TUI-style notmuch search viewer for Evolution
+
+# Store terminal dimensions
+TERM_HEIGHT=$(tput lines)
+TERM_WIDTH=$(tput cols)
+PAGE_SIZE=$((TERM_HEIGHT - 5))
+CURRENT_POS=0
+TOTAL_RESULTS=0
+
+# Handle terminal resize
+handle_resize() {
+  TERM_HEIGHT=$(tput lines)
+  TERM_WIDTH=$(tput cols)
+  PAGE_SIZE=$((TERM_HEIGHT - 5))
+  full_redraw=true
+  draw_results
+}
+trap handle_resize WINCH
+
+# Draw the results screen
+draw_results() {
+  if [ "$full_redraw" = true ]; then
+    clear
+    printf "Search results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit):\n\n" "$QUERY"
+    
+    # Calculate slice of results to show
+    START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
+    END_IDX=$((START_IDX + PAGE_SIZE - 1))
+    [[ $END_IDX -ge $TOTAL_RESULTS ]] && END_IDX=$((TOTAL_RESULTS - 1))
+    
+    # Display all visible results
+    for i in $(seq $START_IDX $END_IDX); do
+      # Calculate available width for text (accounting for the prefix "XX. ")
+      AVAILABLE_WIDTH=$((TERM_WIDTH - 4))
+      TEXT="${DISPLAY_TEXTS[i]}"
+      
+      # Truncate text if needed and add ellipsis
+      if [ ${#TEXT} -gt $AVAILABLE_WIDTH ]; then
+        TEXT="${TEXT:0:$((AVAILABLE_WIDTH-1))}…"
+      fi
+      
+      if [ $i -eq $CURRENT_POS ]; then
+        tput rev
+        printf "%2d. %s\n" $((i+1)) "$TEXT"
+        tput sgr0
+      else
+        printf "%2d. %s\n" $((i+1)) "$TEXT"
+      fi
+    done
+    
+    # Show pagination info
+    printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) $TOTAL_RESULTS
+  else
+    # Just update the highlighted lines
+    START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
+    
+    # Unhighlight previous position
+    if [ -n "$prev_pos" ] && [ "$prev_pos" -ge "$START_IDX" ] && [ "$prev_pos" -lt $((START_IDX + PAGE_SIZE)) ]; then
+      # Calculate available width for text
+      AVAILABLE_WIDTH=$((TERM_WIDTH - 4))
+      TEXT="${DISPLAY_TEXTS[prev_pos]}"
+      
+      # Truncate text if needed and add ellipsis
+      if [ ${#TEXT} -gt $AVAILABLE_WIDTH ]; then
+        TEXT="${TEXT:0:$((AVAILABLE_WIDTH-1))}…"
+      fi
+      
+      tput cup $((2 + prev_pos - START_IDX)) 0
+      printf "%2d. %s" $((prev_pos+1)) "$TEXT"
+      tput el
+    fi
+    
+    # Highlight current position
+    # Calculate available width for text
+    AVAILABLE_WIDTH=$((TERM_WIDTH - 4))
+    TEXT="${DISPLAY_TEXTS[CURRENT_POS]}"
+    
+    # Truncate text if needed and add ellipsis
+    if [ ${#TEXT} -gt $AVAILABLE_WIDTH ]; then
+      TEXT="${TEXT:0:$((AVAILABLE_WIDTH-1))}…"
+    fi
+    
+    tput cup $((2 + CURRENT_POS - START_IDX)) 0
+    tput rev
+    printf "%2d. %s" $((CURRENT_POS+1)) "$TEXT"
+    tput el
+    tput sgr0
+  fi
+}
+
+# Main loop for user interaction
+main_loop() {
+  full_redraw=true
+  draw_results
+  while true; do
+    # Use a timeout with read to allow system to sleep
+    # This makes the script yield control periodically
+    read -rsn1 -t 1 key
+    
+    # If no key was pressed (timeout occurred), continue the loop
+    if [ $? -ne 0 ]; then
+      continue
+    fi
+    
+    case "$key" in
+      j)  # Move down
+          if [ $CURRENT_POS -lt $((TOTAL_RESULTS - 1)) ]; then
+            prev_pos=$CURRENT_POS
+            CURRENT_POS=$((CURRENT_POS + 1))
+            # Check if we need to redraw the whole page
+            if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+              full_redraw=true
+            else
+              full_redraw=false
+            fi
+            draw_results
+          fi
+          ;;
+      k)  # Move up
+          if [ $CURRENT_POS -gt 0 ]; then
+            prev_pos=$CURRENT_POS
+            CURRENT_POS=$((CURRENT_POS - 1))
+            # Check if we need to redraw the whole page
+            if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+              full_redraw=true
+            else
+              full_redraw=false
+            fi
+            draw_results
+          fi
+          ;;
+      G)  # Go to last result
+          prev_pos=$CURRENT_POS
+          CURRENT_POS=$((TOTAL_RESULTS - 1))
+          # Check if we need to redraw the whole page
+          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+          else
+            full_redraw=false
+          fi
+          draw_results
+          ;;
+      g)  # First part of 'gg' command or just 'g'
+          # Wait for another key press
+          read -rsn1 -t 0.5 next_key
+          if [ "$next_key" = "g" ]; then
+            # 'gg' - go to first result
+            prev_pos=$CURRENT_POS
+            CURRENT_POS=0
+            # Check if we need to redraw the whole page
+            if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+              full_redraw=true
+            else
+              full_redraw=false
+            fi
+            draw_results
+          fi
+          ;;
+      "")  # Enter key
+          # Get the message ID from our stored array
+          MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
+          
+          # Debug info - save to a file for inspection
+          {
+            echo "Selected position: $CURRENT_POS"
+            echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
+            echo "Message ID: $MESSAGE_ID"
+          } > ~/.nms_debug.log
+          
+          clear
+          tput sgr0
+          evolution "mid:$MESSAGE_ID" &
+          sleep 1
+          full_redraw=true
+          draw_results
+          ;;
+      q)  # Quit
+          clear
+          tput sgr0
+          exit 0
+          ;;
+    esac
+  done
+}
+
+# Get search query from command line arguments
+QUERY="$*"
+
+# Run notmuch search for individual messages and store results
+readarray -t MESSAGE_RESULTS < <(notmuch search --output=messages "$QUERY")
+
+# Get formatted display text for each message
+DISPLAY_TEXTS=()
+MESSAGE_IDS=()
+for msg_id in "${MESSAGE_RESULTS[@]}"; do
+  # Extract just the message ID without the id: prefix
+  CLEAN_ID=$(echo "$msg_id" | sed 's/^.*id://')
+  MESSAGE_IDS+=("$CLEAN_ID")
+  
+  # Get formatted display text for this message
+  FORMATTED_TEXT=$(notmuch show --format=text --entire-thread=false "id:$CLEAN_ID" | grep -m 1 "Subject:" | sed 's/Subject: //')
+  
+  # If subject is empty, use a placeholder
+  if [ -z "$FORMATTED_TEXT" ]; then
+    FORMATTED_TEXT="[No Subject]"
+  fi
+  
+  # Get sender, date, and flags
+  SENDER=$(notmuch show --format=text --entire-thread=false "id:$CLEAN_ID" | grep -m 1 "From:" | sed 's/From: //')
+  DATE_RAW=$(notmuch show --format=text --entire-thread=false "id:$CLEAN_ID" | grep -m 1 "Date:" | sed 's/Date: //')
+  
+  # Only show a flag indicator if the message is flagged
+  if notmuch search --output=tags "id:$CLEAN_ID" | grep -q "flagged"; then
+    FLAGS="F"  # Flag emoji
+  else
+    FLAGS=""
+  fi
+  
+  # Convert date to YYYY-MM-DD format
+  DATE=$(date -d "$DATE_RAW" +"%Y-%m-%d" 2>/dev/null)
+  # If date conversion fails, use the original date
+  if [ $? -ne 0 ]; then
+    DATE="$DATE_RAW"
+  fi
+  
+  # Format flags to be exactly 3 characters wide
+  if [ ${#FLAGS} -gt 0 ]; then
+    FLAGS="$FLAGS"  # Add two spaces after the flag
+  else
+    FLAGS=" "  # Three spaces if no flag
+  fi
+  
+  # Format sender to be exactly 32 characters wide (increased back to original size since flags column is smaller)
+  if [ ${#SENDER} -gt 32 ]; then
+    SENDER="${SENDER:0:31}…"
+  else
+    # Pad with spaces if shorter than 32 characters
+    while [ ${#SENDER} -lt 32 ]; do
+      SENDER="$SENDER "
+    done
+  fi
+  
+  # Format the display text
+  DISPLAY_TEXT="$DATE $FLAGS $SENDER   $FORMATTED_TEXT"
+  DISPLAY_TEXTS+=("$DISPLAY_TEXT")
+done
+
+# Get the count of results
+TOTAL_RESULTS=${#MESSAGE_IDS[@]}
+
+# If no results, exit
+if [ $TOTAL_RESULTS -eq 0 ]; then
+  echo "No results found."
+  exit 0
+fi
+
+# Start the interactive TUI
+main_loop
