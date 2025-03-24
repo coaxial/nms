@@ -22,7 +22,11 @@ trap handle_resize WINCH
 draw_results() {
   if [ "$full_redraw" = true ]; then
     clear
-    printf "Search results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit):\n\n" "$QUERY"
+    if [ -f "/tmp/nms_loading_complete_$$" ]; then
+      printf "Search results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit):\n\n" "$QUERY"
+    else
+      printf "Loading results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit/cancel):\n\n" "$QUERY"
+    fi
     
     # Calculate slice of results to show
     START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
@@ -49,8 +53,12 @@ draw_results() {
       fi
     done
     
-    # Show pagination info
-    printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
+    # Show pagination info with loading indicator if still loading
+    if [ -f "/tmp/nms_loading_complete_$$" ]; then
+      printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
+    else
+      printf "\nShowing %d-%d of %d results (loading...)\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
+    fi
   else
     # Just update the highlighted lines
     START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
@@ -185,13 +193,23 @@ main_loop() {
 # Get search query from command line arguments
 QUERY="$*"
 
-# Run notmuch search for individual messages and store results
-readarray -t MESSAGE_RESULTS < <(notmuch search --output=messages "$QUERY")
-
-# Get formatted display text for each message
+# Initialize arrays before loading results
 DISPLAY_TEXTS=()
 MESSAGE_IDS=()
-for msg_id in "${MESSAGE_RESULTS[@]}"; do
+TOTAL_RESULTS=0
+
+# Show initial loading screen
+clear
+printf "Searching for '%s'... (press q to cancel)\n\n" "$QUERY"
+printf "Loading results...\n"
+
+# Create a temporary file to signal cancellation
+CANCEL_FILE="/tmp/nms_cancel_$$"
+rm -f "$CANCEL_FILE"
+
+# Function to process a single result and add it to the display
+process_result() {
+  local msg_id="$1"
   # Extract just the message ID without the id: prefix
   # This is too complex a regex, it cannot be replaced with the syntax suggested
   # in SC2001.
@@ -242,14 +260,76 @@ for msg_id in "${MESSAGE_RESULTS[@]}"; do
   # Format the display text
   DISPLAY_TEXT="$DATE $FLAGS $SENDER   $FORMATTED_TEXT"
   DISPLAY_TEXTS+=("$DISPLAY_TEXT")
+  
+  # Increment the total results counter
+  TOTAL_RESULTS=$((TOTAL_RESULTS + 1))
+  
+  # Update the display if this is the first result or every 5 results
+  if [ "$TOTAL_RESULTS" -eq 1 ] || [ "$((TOTAL_RESULTS % 5))" -eq 0 ]; then
+    # Clear the loading message
+    if [ "$TOTAL_RESULTS" -eq 1 ]; then
+      clear
+    fi
+    full_redraw=true
+    draw_results
+  fi
+}
+
+# Function to check for keypresses during loading
+check_for_cancel() {
+  read -rsn1 -t 0.1 key
+  if [ "$key" = "q" ]; then
+    touch "$CANCEL_FILE"
+    return 1
+  fi
+  return 0
+}
+
+# Start loading results in the background
+{
+  notmuch search --output=messages "$QUERY" | while read -r msg_id; do
+    # Check if user pressed q to cancel
+    if [ -f "$CANCEL_FILE" ]; then
+      break
+    fi
+    
+    # Process this result
+    process_result "$msg_id"
+    
+    # Brief pause to allow UI updates and key checking
+    sleep 0.01
+  done
+  
+  # Signal that loading is complete
+  touch "/tmp/nms_loading_complete_$$"
+  
+  # If no results were found, show a message and exit
+  if [ "$TOTAL_RESULTS" -eq 0 ]; then
+    clear
+    echo "No results found."
+    rm -f "$CANCEL_FILE"
+    exit 0
+  fi
+  
+  # Final redraw after all results are loaded
+  full_redraw=true
+  draw_results
+} &
+
+# Monitor for keypresses during loading
+while [ ! -f "/tmp/nms_loading_complete_$$" ] && [ ! -f "$CANCEL_FILE" ]; do
+  check_for_cancel || break
+  sleep 0.1
 done
 
-# Get the count of results
-TOTAL_RESULTS=${#MESSAGE_IDS[@]}
+# Clean up temporary files
+rm -f "/tmp/nms_loading_complete_$$"
 
-# If no results, exit
-if [ "$TOTAL_RESULTS" -eq 0 ]; then
-  echo "No results found."
+# If loading was cancelled, exit
+if [ -f "$CANCEL_FILE" ]; then
+  rm -f "$CANCEL_FILE"
+  clear
+  echo "Search cancelled."
   exit 0
 fi
 
