@@ -226,6 +226,12 @@ rm -f "$CANCEL_FILE" "$LOADING_COMPLETE_FILE"
 # Function to process a single result and add it to the display
 process_result() {
   local msg_id="$1"
+  
+  # Check if temp directory still exists before proceeding
+  if [ ! -d "$TEMP_DIR" ]; then
+    return 1
+  fi
+  
   # Extract just the message ID without the id: prefix
   # This is too complex a regex, it cannot be replaced with the syntax suggested
   # in SC2001.
@@ -275,20 +281,27 @@ process_result() {
   # Format the display text
   DISPLAY_TEXT="$DATE $FLAGS $SENDER   $FORMATTED_TEXT"
   
-  # Save this result to the results file with the full message ID
-  echo "$CLEAN_ID|$DISPLAY_TEXT" >> "$RESULTS_FILE"
-  
-  # Update the display if this is the first result or every 5 results
-  local count
-  count=$(wc -l < "$RESULTS_FILE")
-  if [ "$count" -eq 1 ] || [ "$((count % 5))" -eq 0 ]; then
-    # Clear the loading message
-    if [ "$count" -eq 1 ]; then
-      clear
-    fi
+  # Check again if temp directory exists before writing
+  if [ -d "$TEMP_DIR" ]; then
+    # Save this result to the results file with the full message ID
+    echo "$CLEAN_ID|$DISPLAY_TEXT" >> "$RESULTS_FILE" 2>/dev/null
     
-    # Signal the main process to update the display
-    touch "$TEMP_DIR/update_display"
+    # Update the display if this is the first result or every 5 results
+    if [ -f "$RESULTS_FILE" ]; then
+      local count
+      count=$(wc -l < "$RESULTS_FILE" 2>/dev/null || echo "0")
+      if [ "$count" -eq 1 ] || [ "$((count % 5))" -eq 0 ]; then
+        # Clear the loading message
+        if [ "$count" -eq 1 ]; then
+          clear
+        fi
+        
+        # Signal the main process to update the display
+        if [ -d "$TEMP_DIR" ]; then
+          touch "$TEMP_DIR/update_display" 2>/dev/null
+        fi
+      fi
+    fi
   fi
 }
 
@@ -299,10 +312,13 @@ load_results() {
   DISPLAY_TEXTS=()
   MESSAGE_IDS=()
   
-  while IFS="|" read -r id text; do
-    MESSAGE_IDS+=("$id")
-    DISPLAY_TEXTS+=("$text")
-  done < "$RESULTS_FILE"
+  # Check if results file exists before trying to read it
+  if [ -f "$RESULTS_FILE" ]; then
+    while IFS="|" read -r id text; do
+      MESSAGE_IDS+=("$id")
+      DISPLAY_TEXTS+=("$text")
+    done < "$RESULTS_FILE"
+  fi
   
   TOTAL_RESULTS=${#MESSAGE_IDS[@]}
 }
@@ -310,8 +326,8 @@ load_results() {
 # Start loading results in the background
 {
   notmuch search --output=messages "$QUERY" | while read -r msg_id; do
-    # Check if user pressed q to cancel
-    if [ -f "$CANCEL_FILE" ]; then
+    # Check if user pressed q to cancel or if temp dir was removed
+    if [ -f "$CANCEL_FILE" ] || [ ! -d "$TEMP_DIR" ]; then
       break
     fi
     
@@ -322,14 +338,17 @@ load_results() {
     sleep 0.01
   done
   
-  # Signal that loading is complete
-  touch "$LOADING_COMPLETE_FILE"
-  
-  # If no results were found, show a message and exit
-  if [ ! -s "$RESULTS_FILE" ]; then
-    echo "NO_RESULTS" > "$TEMP_DIR/status"
-  else
-    echo "COMPLETE" > "$TEMP_DIR/status"
+  # Only continue if the temp directory still exists
+  if [ -d "$TEMP_DIR" ]; then
+    # Signal that loading is complete
+    touch "$LOADING_COMPLETE_FILE" 2>/dev/null
+    
+    # If no results were found, show a message and exit
+    if [ ! -s "$RESULTS_FILE" ]; then
+      echo "NO_RESULTS" > "$TEMP_DIR/status" 2>/dev/null
+    else
+      echo "COMPLETE" > "$TEMP_DIR/status" 2>/dev/null
+    fi
   fi
 } &
 
@@ -422,8 +441,17 @@ handle_loading_input() {
         fi
         ;;
     q)  # Quit
-        touch "$CANCEL_FILE"
-        return 1
+        # Create cancel file only if the directory exists
+        if [ -d "$TEMP_DIR" ]; then
+          touch "$CANCEL_FILE" 2>/dev/null
+        fi
+        clear
+        echo "Search cancelled."
+        # Only try to remove if it exists
+        if [ -d "$TEMP_DIR" ]; then
+          rm -rf "$TEMP_DIR"
+        fi
+        exit 0
         ;;
   esac
   return 0
@@ -432,11 +460,13 @@ handle_loading_input() {
 # Monitor for keypresses and updates during loading
 while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
   # Always load the latest results before checking for input
-  if [ -f "$TEMP_DIR/update_display" ]; then
-    rm -f "$TEMP_DIR/update_display"
-    load_results
-    full_redraw=true
-    draw_results
+  if [ -d "$TEMP_DIR" ] && [ -f "$TEMP_DIR/update_display" ]; then
+    rm -f "$TEMP_DIR/update_display" 2>/dev/null
+    if [ -f "$RESULTS_FILE" ]; then
+      load_results
+      full_redraw=true
+      draw_results
+    fi
   fi
   
   # Check for user input with a short timeout
@@ -444,11 +474,15 @@ while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
     # Handle Enter key specifically (which might be empty or a newline)
     if [ -z "$key" ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
       # Reload results before handling input to ensure we have the latest data
-      load_results
+      if [ -d "$TEMP_DIR" ] && [ -f "$RESULTS_FILE" ]; then
+        load_results
+      fi
       handle_loading_input "$key" || break
     elif [ -n "$key" ]; then
       # Reload results before handling input to ensure we have the latest data
-      load_results
+      if [ -d "$TEMP_DIR" ] && [ -f "$RESULTS_FILE" ]; then
+        load_results
+      fi
       handle_loading_input "$key" || break
     fi
   fi
@@ -470,13 +504,7 @@ if [ -f "$TEMP_DIR/status" ]; then
   fi
 fi
 
-# If loading was cancelled, exit
-if [ -f "$CANCEL_FILE" ]; then
-  rm -rf "$TEMP_DIR"
-  clear
-  echo "Search cancelled."
-  exit 0
-fi
+# If loading was cancelled, we've already exited in the handle_loading_input function
 
 # Final redraw after all results are loaded
 full_redraw=true
