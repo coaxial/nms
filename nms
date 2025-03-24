@@ -22,7 +22,11 @@ trap handle_resize WINCH
 draw_results() {
   if [ "$full_redraw" = true ]; then
     clear
-    printf "Search results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit):\n\n" "$QUERY"
+    if [ -f "$LOADING_COMPLETE_FILE" ]; then
+      printf "Search results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit):\n\n" "$QUERY"
+    else
+      printf "Loading results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit/cancel):\n\n" "$QUERY"
+    fi
     
     # Calculate slice of results to show
     START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
@@ -49,8 +53,12 @@ draw_results() {
       fi
     done
     
-    # Show pagination info
-    printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
+    # Show pagination info with loading indicator if still loading
+    if [ -f "$LOADING_COMPLETE_FILE" ]; then
+      printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
+    else
+      printf "\nShowing %d-%d of %d results (loading...)\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
+    fi
   else
     # Just update the highlighted lines
     START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
@@ -90,6 +98,12 @@ draw_results() {
 }
 
 # Main loop for user interaction
+# Clean up function to remove temporary files on exit
+cleanup() {
+  rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+
 main_loop() {
   full_redraw=true
   draw_results
@@ -155,7 +169,7 @@ main_loop() {
             draw_results
           fi
           ;;
-      "")  # Enter key
+      ""|$'\n'|$'\r')  # Enter key (handles multiple representations)
           # Get the message ID from our stored array
           MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
           
@@ -164,11 +178,14 @@ main_loop() {
             echo "Selected position: $CURRENT_POS"
             echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
             echo "Message ID: $MESSAGE_ID"
+            echo "Key code detected: $key (decimal: $(printf '%d' "'$key"))"
           } > ~/.nms_debug.log
           
           clear
           tput sgr0
+          # Use the proper format for Evolution
           evolution "mid:$MESSAGE_ID" &
+          # Wait for Evolution to start
           sleep 1
           full_redraw=true
           draw_results
@@ -185,19 +202,35 @@ main_loop() {
 # Get search query from command line arguments
 QUERY="$*"
 
-# Run notmuch search for individual messages and store results
-readarray -t MESSAGE_RESULTS < <(notmuch search --output=messages "$QUERY")
-
-# Get formatted display text for each message
+# Initialize arrays before loading results
 DISPLAY_TEXTS=()
 MESSAGE_IDS=()
-for msg_id in "${MESSAGE_RESULTS[@]}"; do
+TOTAL_RESULTS=0
+
+# Create temporary files for IPC (Inter-Process Communication)
+TEMP_DIR="/tmp/nms_$$"
+mkdir -p "$TEMP_DIR"
+RESULTS_FILE="$TEMP_DIR/results"
+touch "$RESULTS_FILE"
+
+# Show initial loading screen
+clear
+printf "Searching for '%s'... (press q to cancel)\n\n" "$QUERY"
+printf "Loading results...\n"
+
+# Create temporary files for signaling
+CANCEL_FILE="$TEMP_DIR/cancel"
+LOADING_COMPLETE_FILE="$TEMP_DIR/loading_complete"
+rm -f "$CANCEL_FILE" "$LOADING_COMPLETE_FILE"
+
+# Function to process a single result and add it to the display
+process_result() {
+  local msg_id="$1"
   # Extract just the message ID without the id: prefix
   # This is too complex a regex, it cannot be replaced with the syntax suggested
   # in SC2001.
   # shellcheck disable=SC2001
-  CLEAN_ID=$(echo "$msg_id" | sed 's/^.*id://')
-  MESSAGE_IDS+=("$CLEAN_ID")
+  CLEAN_ID=$(echo "$msg_id" | sed 's/^id://')
   
   # Get formatted display text for this message
   FORMATTED_TEXT=$(notmuch show --format=text --entire-thread=false "id:$CLEAN_ID" | grep -m 1 "Subject:" | sed 's/Subject: //')
@@ -241,17 +274,213 @@ for msg_id in "${MESSAGE_RESULTS[@]}"; do
   
   # Format the display text
   DISPLAY_TEXT="$DATE $FLAGS $SENDER   $FORMATTED_TEXT"
-  DISPLAY_TEXTS+=("$DISPLAY_TEXT")
+  
+  # Save this result to the results file with the full message ID
+  echo "$CLEAN_ID|$DISPLAY_TEXT" >> "$RESULTS_FILE"
+  
+  # Update the display if this is the first result or every 5 results
+  local count
+  count=$(wc -l < "$RESULTS_FILE")
+  if [ "$count" -eq 1 ] || [ "$((count % 5))" -eq 0 ]; then
+    # Clear the loading message
+    if [ "$count" -eq 1 ]; then
+      clear
+    fi
+    
+    # Signal the main process to update the display
+    touch "$TEMP_DIR/update_display"
+  fi
+}
+
+# This function is no longer needed as we handle all keypresses in the main loop
+
+# Function to load results from the results file
+load_results() {
+  DISPLAY_TEXTS=()
+  MESSAGE_IDS=()
+  
+  while IFS="|" read -r id text; do
+    MESSAGE_IDS+=("$id")
+    DISPLAY_TEXTS+=("$text")
+  done < "$RESULTS_FILE"
+  
+  TOTAL_RESULTS=${#MESSAGE_IDS[@]}
+}
+
+# Start loading results in the background
+{
+  notmuch search --output=messages "$QUERY" | while read -r msg_id; do
+    # Check if user pressed q to cancel
+    if [ -f "$CANCEL_FILE" ]; then
+      break
+    fi
+    
+    # Process this result
+    process_result "$msg_id"
+    
+    # Brief pause to allow UI updates and key checking
+    sleep 0.01
+  done
+  
+  # Signal that loading is complete
+  touch "$LOADING_COMPLETE_FILE"
+  
+  # If no results were found, show a message and exit
+  if [ ! -s "$RESULTS_FILE" ]; then
+    echo "NO_RESULTS" > "$TEMP_DIR/status"
+  else
+    echo "COMPLETE" > "$TEMP_DIR/status"
+  fi
+} &
+
+# Wait a moment for the background process to start
+sleep 0.1
+
+# Function to handle user input during loading
+handle_loading_input() {
+  local key="$1"
+  # Log the key code for debugging
+  printf "Key pressed: '%s' (decimal: %d)\n" "$key" "$(printf '%d' "'$key" 2>/dev/null || echo "N/A")" >> ~/.nms_key_debug.log
+  case "$key" in
+    j)  # Move down
+        if [ $CURRENT_POS -lt $((TOTAL_RESULTS - 1)) ]; then
+          prev_pos=$CURRENT_POS
+          CURRENT_POS=$((CURRENT_POS + 1))
+          # Check if we need to redraw the whole page
+          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+          else
+            full_redraw=false
+          fi
+          draw_results
+        fi
+        ;;
+    k)  # Move up
+        if [ $CURRENT_POS -gt 0 ]; then
+          prev_pos=$CURRENT_POS
+          CURRENT_POS=$((CURRENT_POS - 1))
+          # Check if we need to redraw the whole page
+          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+          else
+            full_redraw=false
+          fi
+          draw_results
+        fi
+        ;;
+    G)  # Go to last result
+        prev_pos=$CURRENT_POS
+        CURRENT_POS=$((TOTAL_RESULTS - 1))
+        # Check if we need to redraw the whole page
+        if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+        else
+            full_redraw=false
+        fi
+        draw_results
+        ;;
+    g)  # First part of 'gg' command or just 'g'
+        # Wait for another key press
+        read -rsn1 -t 0.5 next_key
+        if [ "$next_key" = "g" ]; then
+          # 'gg' - go to first result
+          prev_pos=$CURRENT_POS
+          CURRENT_POS=0
+          # Check if we need to redraw the whole page
+          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+          else
+            full_redraw=false
+          fi
+          draw_results
+        fi
+        ;;
+    ""|$'\n'|$'\r')  # Enter key (handles multiple representations)
+        if [ "$TOTAL_RESULTS" -gt 0 ]; then
+          # Get the message ID from our stored array
+          MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
+          
+          # Debug info - save to a file for inspection
+          {
+            echo "Selected position: $CURRENT_POS"
+            echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
+            echo "Message ID: $MESSAGE_ID"
+            echo "Total results: $TOTAL_RESULTS"
+            echo "Current position: $CURRENT_POS"
+            echo "All message IDs: ${MESSAGE_IDS[*]}"
+            echo "Key code detected: $key (decimal: $(printf '%d' "'$key" 2>/dev/null || echo "N/A"))"
+          } > ~/.nms_debug.log
+          
+          clear
+          tput sgr0
+          # Use the proper format for Evolution and ensure it runs in the background
+          evolution "mid:$MESSAGE_ID" &
+          # Wait for Evolution to start
+          sleep 1
+          full_redraw=true
+          draw_results
+        fi
+        ;;
+    q)  # Quit
+        touch "$CANCEL_FILE"
+        return 1
+        ;;
+  esac
+  return 0
+}
+
+# Monitor for keypresses and updates during loading
+while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
+  # Always load the latest results before checking for input
+  if [ -f "$TEMP_DIR/update_display" ]; then
+    rm -f "$TEMP_DIR/update_display"
+    load_results
+    full_redraw=true
+    draw_results
+  fi
+  
+  # Check for user input with a short timeout
+  if read -rsn1 -t 0.1 key; then
+    # Handle Enter key specifically (which might be empty or a newline)
+    if [ -z "$key" ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
+      # Reload results before handling input to ensure we have the latest data
+      load_results
+      handle_loading_input "$key" || break
+    elif [ -n "$key" ]; then
+      # Reload results before handling input to ensure we have the latest data
+      load_results
+      handle_loading_input "$key" || break
+    fi
+  fi
+  
+  sleep 0.01
 done
 
-# Get the count of results
-TOTAL_RESULTS=${#MESSAGE_IDS[@]}
+# Final load of results
+load_results
 
-# If no results, exit
-if [ "$TOTAL_RESULTS" -eq 0 ]; then
-  echo "No results found."
+# Check status
+if [ -f "$TEMP_DIR/status" ]; then
+  STATUS=$(cat "$TEMP_DIR/status")
+  if [ "$STATUS" = "NO_RESULTS" ]; then
+    clear
+    echo "No results found."
+    rm -rf "$TEMP_DIR"
+    exit 0
+  fi
+fi
+
+# If loading was cancelled, exit
+if [ -f "$CANCEL_FILE" ]; then
+  rm -rf "$TEMP_DIR"
+  clear
+  echo "Search cancelled."
   exit 0
 fi
+
+# Final redraw after all results are loaded
+full_redraw=true
+draw_results
 
 # Start the interactive TUI
 main_loop
