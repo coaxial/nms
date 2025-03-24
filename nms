@@ -40,7 +40,7 @@ draw_results() {
         TEXT="${TEXT:0:$((AVAILABLE_WIDTH-1))}…"
       fi
       
-      if [ $i -eq $CURRENT_POS ]; then
+      if [ "$i" -eq "$CURRENT_POS" ]; then
         tput rev
         printf "%2d. %s\n" $((i+1)) "$TEXT"
         tput sgr0
@@ -50,7 +50,7 @@ draw_results() {
     done
     
     # Show pagination info
-    printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) $TOTAL_RESULTS
+    printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
   else
     # Just update the highlighted lines
     START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
@@ -96,10 +96,8 @@ main_loop() {
   while true; do
     # Use a timeout with read to allow system to sleep
     # This makes the script yield control periodically
-    read -rsn1 -t 1 key
-    
     # If no key was pressed (timeout occurred), continue the loop
-    if [ $? -ne 0 ]; then
+    if ! read -rsn1 -t 1 key; then
       continue
     fi
     
@@ -195,6 +193,9 @@ DISPLAY_TEXTS=()
 MESSAGE_IDS=()
 for msg_id in "${MESSAGE_RESULTS[@]}"; do
   # Extract just the message ID without the id: prefix
+  # This is too complex a regex, it cannot be replaced with the syntax suggested
+  # in SC2001.
+  # shellcheck disable=SC2001
   CLEAN_ID=$(echo "$msg_id" | sed 's/^.*id://')
   MESSAGE_IDS+=("$CLEAN_ID")
   
@@ -218,9 +219,8 @@ for msg_id in "${MESSAGE_RESULTS[@]}"; do
   fi
   
   # Convert date to YYYY-MM-DD format
-  DATE=$(date -d "$DATE_RAW" +"%Y-%m-%d" 2>/dev/null)
   # If date conversion fails, use the original date
-  if [ $? -ne 0 ]; then
+  if ! DATE=$(date -d "$DATE_RAW" +"%Y-%m-%d" 2>/dev/null); then
     DATE="$DATE_RAW"
   fi
   
@@ -248,7 +248,7 @@ done
 TOTAL_RESULTS=${#MESSAGE_IDS[@]}
 
 # If no results, exit
-if [ $TOTAL_RESULTS -eq 0 ]; then
+if [ "$TOTAL_RESULTS" -eq 0 ]; then
   echo "No results found."
   exit 0
 fi
