@@ -290,15 +290,7 @@ process_result() {
   fi
 }
 
-# Function to check for keypresses during loading
-check_for_cancel() {
-  read -rsn1 -t 0.1 key
-  if [ "$key" = "q" ]; then
-    touch "$CANCEL_FILE"
-    return 1
-  fi
-  return 0
-}
+# This function is no longer needed as we handle all keypresses in the main loop
 
 # Function to load results from the results file
 load_results() {
@@ -339,11 +331,86 @@ load_results() {
   fi
 } &
 
+# Function to handle user input during loading
+handle_loading_input() {
+  local key="$1"
+  case "$key" in
+    j)  # Move down
+        if [ $CURRENT_POS -lt $((TOTAL_RESULTS - 1)) ]; then
+          prev_pos=$CURRENT_POS
+          CURRENT_POS=$((CURRENT_POS + 1))
+          # Check if we need to redraw the whole page
+          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+          else
+            full_redraw=false
+          fi
+          draw_results
+        fi
+        ;;
+    k)  # Move up
+        if [ $CURRENT_POS -gt 0 ]; then
+          prev_pos=$CURRENT_POS
+          CURRENT_POS=$((CURRENT_POS - 1))
+          # Check if we need to redraw the whole page
+          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+          else
+            full_redraw=false
+          fi
+          draw_results
+        fi
+        ;;
+    G)  # Go to last result
+        prev_pos=$CURRENT_POS
+        CURRENT_POS=$((TOTAL_RESULTS - 1))
+        # Check if we need to redraw the whole page
+        if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+          full_redraw=true
+        else
+          full_redraw=false
+        fi
+        draw_results
+        ;;
+    g)  # First part of 'gg' command or just 'g'
+        # Wait for another key press
+        read -rsn1 -t 0.5 next_key
+        if [ "$next_key" = "g" ]; then
+          # 'gg' - go to first result
+          prev_pos=$CURRENT_POS
+          CURRENT_POS=0
+          # Check if we need to redraw the whole page
+          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            full_redraw=true
+          else
+            full_redraw=false
+          fi
+          draw_results
+        fi
+        ;;
+    "")  # Enter key
+        if [ $TOTAL_RESULTS -gt 0 ]; then
+          # Get the message ID from our stored array
+          MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
+          
+          clear
+          tput sgr0
+          evolution "mid:$MESSAGE_ID" &
+          sleep 1
+          full_redraw=true
+          draw_results
+        fi
+        ;;
+    q)  # Quit
+        touch "$CANCEL_FILE"
+        return 1
+        ;;
+  esac
+  return 0
+}
+
 # Monitor for keypresses and updates during loading
 while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
-  # Check for cancel request
-  check_for_cancel || break
-  
   # Check if we need to update the display
   if [ -f "$TEMP_DIR/update_display" ]; then
     rm -f "$TEMP_DIR/update_display"
@@ -352,7 +419,13 @@ while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
     draw_results
   fi
   
-  sleep 0.1
+  # Check for user input with a short timeout
+  read -rsn1 -t 0.1 key
+  if [ -n "$key" ]; then
+    handle_loading_input "$key" || break
+  fi
+  
+  sleep 0.01
 done
 
 # Final load of results
