@@ -396,7 +396,7 @@ handle_loading_input() {
         fi
         ;;
     ""|$'\n'|$'\r')  # Enter key (handles multiple representations)
-        if [ $TOTAL_RESULTS -gt 0 ]; then
+        if [ "$TOTAL_RESULTS" -gt 0 ]; then
           # Get the message ID from our stored array
           MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
           
