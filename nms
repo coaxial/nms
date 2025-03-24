@@ -169,7 +169,7 @@ main_loop() {
             draw_results
           fi
           ;;
-      "")  # Enter key
+      ""|$'\n'|$'\r')  # Enter key (handles multiple representations)
           # Get the message ID from our stored array
           MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
           
@@ -178,12 +178,14 @@ main_loop() {
             echo "Selected position: $CURRENT_POS"
             echo "Display text: ${DISPLAY_TEXTS[$CURRENT_POS]}"
             echo "Message ID: $MESSAGE_ID"
+            echo "Key code detected: $key (decimal: $(printf '%d' "'$key"))"
           } > ~/.nms_debug.log
           
           clear
           tput sgr0
           # Use the proper format for Evolution
           evolution "mid:$MESSAGE_ID" &
+          # Wait for Evolution to start
           sleep 1
           full_redraw=true
           draw_results
@@ -337,6 +339,8 @@ sleep 0.1
 # Function to handle user input during loading
 handle_loading_input() {
   local key="$1"
+  # Log the key code for debugging
+  printf "Key pressed: '%s' (decimal: %d)\n" "$key" "$(printf '%d' "'$key" 2>/dev/null || echo "N/A")" >> ~/.nms_key_debug.log
   case "$key" in
     j)  # Move down
         if [ $CURRENT_POS -lt $((TOTAL_RESULTS - 1)) ]; then
@@ -391,7 +395,7 @@ handle_loading_input() {
           draw_results
         fi
         ;;
-    "")  # Enter key
+    ""|$'\n'|$'\r')  # Enter key (handles multiple representations)
         if [ $TOTAL_RESULTS -gt 0 ]; then
           # Get the message ID from our stored array
           MESSAGE_ID="${MESSAGE_IDS[$CURRENT_POS]}"
@@ -404,12 +408,14 @@ handle_loading_input() {
             echo "Total results: $TOTAL_RESULTS"
             echo "Current position: $CURRENT_POS"
             echo "All message IDs: ${MESSAGE_IDS[*]}"
+            echo "Key code detected: $key (decimal: $(printf '%d' "'$key" 2>/dev/null || echo "N/A"))"
           } > ~/.nms_debug.log
           
           clear
           tput sgr0
-          # Use the proper format for Evolution
+          # Use the proper format for Evolution and ensure it runs in the background
           evolution "mid:$MESSAGE_ID" &
+          # Wait for Evolution to start
           sleep 1
           full_redraw=true
           draw_results
@@ -434,11 +440,17 @@ while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
   fi
   
   # Check for user input with a short timeout
-  read -rsn1 -t 0.1 key
-  if [ -n "$key" ]; then
-    # Reload results before handling input to ensure we have the latest data
-    load_results
-    handle_loading_input "$key" || break
+  if read -rsn1 -t 0.1 key; then
+    # Handle Enter key specifically (which might be empty or a newline)
+    if [ -z "$key" ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
+      # Reload results before handling input to ensure we have the latest data
+      load_results
+      handle_loading_input "$key" || break
+    elif [ -n "$key" ]; then
+      # Reload results before handling input to ensure we have the latest data
+      load_results
+      handle_loading_input "$key" || break
+    fi
   fi
   
   sleep 0.01
