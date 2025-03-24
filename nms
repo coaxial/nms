@@ -22,7 +22,7 @@ trap handle_resize WINCH
 draw_results() {
   if [ "$full_redraw" = true ]; then
     clear
-    if [ -f "/tmp/nms_loading_complete_$$" ]; then
+    if [ -f "$LOADING_COMPLETE_FILE" ]; then
       printf "Search results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit):\n\n" "$QUERY"
     else
       printf "Loading results for '%s' (j/k to navigate, gg/G to jump, Enter to open, q to quit/cancel):\n\n" "$QUERY"
@@ -54,7 +54,7 @@ draw_results() {
     done
     
     # Show pagination info with loading indicator if still loading
-    if [ -f "/tmp/nms_loading_complete_$$" ]; then
+    if [ -f "$LOADING_COMPLETE_FILE" ]; then
       printf "\nShowing %d-%d of %d results\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
     else
       printf "\nShowing %d-%d of %d results (loading...)\n" $((START_IDX+1)) $((END_IDX+1)) "$TOTAL_RESULTS"
@@ -98,6 +98,12 @@ draw_results() {
 }
 
 # Main loop for user interaction
+# Clean up function to remove temporary files on exit
+cleanup() {
+  rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+
 main_loop() {
   full_redraw=true
   draw_results
@@ -198,14 +204,21 @@ DISPLAY_TEXTS=()
 MESSAGE_IDS=()
 TOTAL_RESULTS=0
 
+# Create temporary files for IPC (Inter-Process Communication)
+TEMP_DIR="/tmp/nms_$$"
+mkdir -p "$TEMP_DIR"
+RESULTS_FILE="$TEMP_DIR/results"
+touch "$RESULTS_FILE"
+
 # Show initial loading screen
 clear
 printf "Searching for '%s'... (press q to cancel)\n\n" "$QUERY"
 printf "Loading results...\n"
 
-# Create a temporary file to signal cancellation
-CANCEL_FILE="/tmp/nms_cancel_$$"
-rm -f "$CANCEL_FILE"
+# Create temporary files for signaling
+CANCEL_FILE="$TEMP_DIR/cancel"
+LOADING_COMPLETE_FILE="$TEMP_DIR/loading_complete"
+rm -f "$CANCEL_FILE" "$LOADING_COMPLETE_FILE"
 
 # Function to process a single result and add it to the display
 process_result() {
@@ -259,19 +272,21 @@ process_result() {
   
   # Format the display text
   DISPLAY_TEXT="$DATE $FLAGS $SENDER   $FORMATTED_TEXT"
-  DISPLAY_TEXTS+=("$DISPLAY_TEXT")
   
-  # Increment the total results counter
-  TOTAL_RESULTS=$((TOTAL_RESULTS + 1))
+  # Save this result to the results file
+  echo "$CLEAN_ID|$DISPLAY_TEXT" >> "$RESULTS_FILE"
   
   # Update the display if this is the first result or every 5 results
-  if [ "$TOTAL_RESULTS" -eq 1 ] || [ "$((TOTAL_RESULTS % 5))" -eq 0 ]; then
+  local count
+  count=$(wc -l < "$RESULTS_FILE")
+  if [ "$count" -eq 1 ] || [ "$((count % 5))" -eq 0 ]; then
     # Clear the loading message
-    if [ "$TOTAL_RESULTS" -eq 1 ]; then
+    if [ "$count" -eq 1 ]; then
       clear
     fi
-    full_redraw=true
-    draw_results
+    
+    # Signal the main process to update the display
+    touch "$TEMP_DIR/update_display"
   fi
 }
 
@@ -283,6 +298,19 @@ check_for_cancel() {
     return 1
   fi
   return 0
+}
+
+# Function to load results from the results file
+load_results() {
+  DISPLAY_TEXTS=()
+  MESSAGE_IDS=()
+  
+  while IFS="|" read -r id text; do
+    MESSAGE_IDS+=("$id")
+    DISPLAY_TEXTS+=("$text")
+  done < "$RESULTS_FILE"
+  
+  TOTAL_RESULTS=${#MESSAGE_IDS[@]}
 }
 
 # Start loading results in the background
@@ -301,37 +329,57 @@ check_for_cancel() {
   done
   
   # Signal that loading is complete
-  touch "/tmp/nms_loading_complete_$$"
+  touch "$LOADING_COMPLETE_FILE"
   
   # If no results were found, show a message and exit
-  if [ "$TOTAL_RESULTS" -eq 0 ]; then
-    clear
-    echo "No results found."
-    rm -f "$CANCEL_FILE"
-    exit 0
+  if [ ! -s "$RESULTS_FILE" ]; then
+    echo "NO_RESULTS" > "$TEMP_DIR/status"
+  else
+    echo "COMPLETE" > "$TEMP_DIR/status"
   fi
-  
-  # Final redraw after all results are loaded
-  full_redraw=true
-  draw_results
 } &
 
-# Monitor for keypresses during loading
-while [ ! -f "/tmp/nms_loading_complete_$$" ] && [ ! -f "$CANCEL_FILE" ]; do
+# Monitor for keypresses and updates during loading
+while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
+  # Check for cancel request
   check_for_cancel || break
+  
+  # Check if we need to update the display
+  if [ -f "$TEMP_DIR/update_display" ]; then
+    rm -f "$TEMP_DIR/update_display"
+    load_results
+    full_redraw=true
+    draw_results
+  fi
+  
   sleep 0.1
 done
 
-# Clean up temporary files
-rm -f "/tmp/nms_loading_complete_$$"
+# Final load of results
+load_results
+
+# Check status
+if [ -f "$TEMP_DIR/status" ]; then
+  STATUS=$(cat "$TEMP_DIR/status")
+  if [ "$STATUS" = "NO_RESULTS" ]; then
+    clear
+    echo "No results found."
+    rm -rf "$TEMP_DIR"
+    exit 0
+  fi
+fi
 
 # If loading was cancelled, exit
 if [ -f "$CANCEL_FILE" ]; then
-  rm -f "$CANCEL_FILE"
+  rm -rf "$TEMP_DIR"
   clear
   echo "Search cancelled."
   exit 0
 fi
+
+# Final redraw after all results are loaded
+full_redraw=true
+draw_results
 
 # Start the interactive TUI
 main_loop
