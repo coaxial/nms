@@ -224,11 +224,9 @@ for msg_id in "${MESSAGE_RESULTS[@]}"; do
     DATE="$DATE_RAW"
   fi
   
-  # Format flags to be exactly 3 characters wide
-  if [ ${#FLAGS} -gt 0 ]; then
-    FLAGS="$FLAGS"  # Add two spaces after the flag
-  else
-    FLAGS=" "  # Three spaces if no flag
+  # Make the flags "empty" if there are none to keep the column width consistent
+  if [ ${#FLAGS} -eq 0 ]; then
+    FLAGS=" "
   fi
   
   # Format sender to be exactly 32 characters wide (increased back to original size since flags column is smaller)
