@@ -29,7 +29,7 @@ draw_results() {
     fi
     
     # Calculate slice of results to show
-    START_IDX=$((CURRENT_POS - CURRENT_POS % PAGE_SIZE))
+    START_IDX=$((CURRENT_POS / PAGE_SIZE * PAGE_SIZE))
     END_IDX=$((START_IDX + PAGE_SIZE - 1))
     [[ $END_IDX -ge $TOTAL_RESULTS ]] && END_IDX=$((TOTAL_RESULTS - 1))
     
@@ -121,7 +121,7 @@ main_loop() {
             prev_pos=$CURRENT_POS
             CURRENT_POS=$((CURRENT_POS + 1))
             # Check if we need to redraw the whole page
-            if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            if [ $((CURRENT_POS / PAGE_SIZE * PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE * PAGE_SIZE)) ]; then
               full_redraw=true
             else
               full_redraw=false
@@ -134,7 +134,7 @@ main_loop() {
             prev_pos=$CURRENT_POS
             CURRENT_POS=$((CURRENT_POS - 1))
             # Check if we need to redraw the whole page
-            if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+            if [ $((CURRENT_POS / PAGE_SIZE * PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE * PAGE_SIZE)) ]; then
               full_redraw=true
             else
               full_redraw=false
@@ -146,7 +146,7 @@ main_loop() {
           prev_pos=$CURRENT_POS
           CURRENT_POS=$((TOTAL_RESULTS - 1))
           # Check if we need to redraw the whole page
-          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+          if [ $((CURRENT_POS / PAGE_SIZE * PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE * PAGE_SIZE)) ]; then
             full_redraw=true
           else
             full_redraw=false
@@ -288,16 +288,12 @@ process_result() {
     # Save this result to the results file with the full message ID
     echo "$CLEAN_ID|$DISPLAY_TEXT" >> "$RESULTS_FILE" 2>/dev/null
     
-    # Update the display if this is the first result or every 5 results
+    # Signal the main process to update the display, but less frequently
+    # Only update after the first result, then every 20 results
     if [ -f "$RESULTS_FILE" ]; then
       local count
       count=$(wc -l < "$RESULTS_FILE" 2>/dev/null || echo "0")
-      if [ "$count" -eq 1 ] || [ "$((count % 5))" -eq 0 ]; then
-        # Clear the loading message
-        if [ "$count" -eq 1 ]; then
-          clear
-        fi
-        
+      if [ "$count" -eq 1 ] || [ "$((count % 20))" -eq 0 ]; then
         # Signal the main process to update the display
         if [ -d "$TEMP_DIR" ]; then
           touch "$TEMP_DIR/update_display" 2>/dev/null
@@ -327,21 +323,57 @@ load_results() {
 
 # Start loading results in the background
 {
-  notmuch search --output=messages "$QUERY" | while read -r msg_id; do
+  # Create a batch counter to process results in batches
+  batch_count=0
+  batch_size=10
+  batch_results=()
+  
+  # Use a separate process to avoid subshell issues with arrays
+  notmuch search --output=messages "$QUERY" > "$TEMP_DIR/all_results"
+  
+  # Process all results from the file
+  while read -r msg_id; do
     # Check if user pressed q to cancel or if temp dir was removed
     if [ -f "$CANCEL_FILE" ] || [ ! -d "$TEMP_DIR" ]; then
       break
     fi
     
-    # Process this result
-    process_result "$msg_id"
+    # Add to batch
+    batch_results+=("$msg_id")
+    batch_count=$((batch_count + 1))
     
-    # Brief pause to allow UI updates and key checking
-    sleep 0.01
+    # Process batch when it reaches batch_size
+    if [ "$batch_count" -ge "$batch_size" ]; then
+      for result in "${batch_results[@]}"; do
+        process_result "$result"
+      done
+      
+      # Clear batch
+      batch_results=()
+      batch_count=0
+      
+      # Force an update after each batch
+      if [ -d "$TEMP_DIR" ]; then
+        touch "$TEMP_DIR/update_display" 2>/dev/null
+      fi
+      
+      # Brief pause to allow UI updates and key checking
+      sleep 0.1
+    fi
+  done < "$TEMP_DIR/all_results"
+  
+  # Process any remaining results in the last batch
+  for result in "${batch_results[@]}"; do
+    process_result "$result"
   done
   
-  # Only continue if the temp directory still exists
+  # Force a final update regardless of batch size
   if [ -d "$TEMP_DIR" ]; then
+    touch "$TEMP_DIR/force_update" 2>/dev/null
+    
+    # Wait a moment to ensure the update is processed
+    sleep 1
+    
     # Signal that loading is complete
     touch "$LOADING_COMPLETE_FILE" 2>/dev/null
     
@@ -370,7 +402,7 @@ handle_loading_input() {
           prev_pos=$CURRENT_POS
           CURRENT_POS=$((CURRENT_POS + 1))
           # Check if we need to redraw the whole page
-          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+          if [ $((CURRENT_POS / PAGE_SIZE * PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE * PAGE_SIZE)) ]; then
             full_redraw=true
           else
             full_redraw=false
@@ -383,7 +415,7 @@ handle_loading_input() {
           prev_pos=$CURRENT_POS
           CURRENT_POS=$((CURRENT_POS - 1))
           # Check if we need to redraw the whole page
-          if [ $((CURRENT_POS / PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE)) ]; then
+          if [ $((CURRENT_POS / PAGE_SIZE * PAGE_SIZE)) -ne $((prev_pos / PAGE_SIZE * PAGE_SIZE)) ]; then
             full_redraw=true
           else
             full_redraw=false
@@ -463,15 +495,38 @@ handle_loading_input() {
   return 0
 }
 
+# Initialize the last update time
+LAST_UPDATE_TIME=$(date +%s.%N)
+
 # Monitor for keypresses and updates during loading
 while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
-  # Always load the latest results before checking for input
-  if [ -d "$TEMP_DIR" ] && [ -f "$TEMP_DIR/update_display" ]; then
-    rm -f "$TEMP_DIR/update_display" 2>/dev/null
+  # Check if we need to update the display
+  if [ -d "$TEMP_DIR" ] && [ -f "$TEMP_DIR/force_update" ]; then
+    # This is a forced update that must happen regardless of timing
+    rm -f "$TEMP_DIR/force_update" 2>/dev/null
     if [ -f "$RESULTS_FILE" ]; then
       load_results
       full_redraw=true
       draw_results
+      LAST_UPDATE_TIME=$(date +%s.%N)
+    fi
+  elif [ -d "$TEMP_DIR" ] && [ -f "$TEMP_DIR/update_display" ]; then
+    # Calculate time since last update
+    CURRENT_TIME=$(date +%s.%N)
+    TIME_DIFF=$(echo "$CURRENT_TIME - $LAST_UPDATE_TIME" | bc)
+    
+    # Only update if at least 0.5 seconds have passed since last update
+    if (( $(echo "$TIME_DIFF > 0.5" | bc -l) )); then
+      rm -f "$TEMP_DIR/update_display" 2>/dev/null
+      if [ -f "$RESULTS_FILE" ]; then
+        load_results
+        full_redraw=true
+        draw_results
+        LAST_UPDATE_TIME=$(date +%s.%N)
+      fi
+    else
+      # Remove the update flag but don't redraw yet
+      rm -f "$TEMP_DIR/update_display" 2>/dev/null
     fi
   fi
   
@@ -496,7 +551,9 @@ while [ ! -f "$LOADING_COMPLETE_FILE" ] && [ ! -f "$CANCEL_FILE" ]; do
   sleep 0.01
 done
 
-# Final load of results
+# Final load of results to ensure we have all results
+# Wait a moment to ensure all results are written to the file
+sleep 0.5
 load_results
 
 # Check status
